@@ -87,22 +87,26 @@ func (s *MCPServer) handleListTools(w http.ResponseWriter, req map[string]interf
 		return
 	}
 
-	// 获取所有工具定义
-	tools := s.registry.ListAll()
+	// 获取该 agent_id 允许的工具名称列表
+	allowedToolNames := s.config.GetAllowedTools(listReq.AgentID)
 
-	// 准备响应（移除 Function 字段，因为不能 JSON 序列化）
-	toolDefs := make([]tools_types.ToolDefinition, len(tools))
-	for i, tool := range tools {
-		toolDefs[i] = tools_types.ToolDefinition{
-			Name:        tool.Name,
-			Description: tool.Description,
-			Parameters:  tool.Parameters,
-			Function:    nil, // 不包含在响应中
+	// 从注册表中获取允许的工具定义
+	var allowedTools []tools_types.ToolDefinition
+	for _, toolName := range allowedToolNames {
+		if toolDef, exists := s.registry.Get(toolName); exists {
+			// 准备响应（移除 Function 字段，因为不能 JSON 序列化）
+			toolDefCopy := tools_types.ToolDefinition{
+				Name:        toolDef.Name,
+				Description: toolDef.Description,
+				Parameters:  toolDef.Parameters,
+				Function:    nil, // 不包含在响应中
+			}
+			allowedTools = append(allowedTools, toolDefCopy)
 		}
 	}
 
 	response := mcp_protocol.MCPListToolsResponse{
-		Tools: toolDefs,
+		Tools: allowedTools,
 	}
 
 	if err := json.NewEncoder(w).Encode(response); err != nil {
@@ -116,6 +120,18 @@ func (s *MCPServer) handleCallTool(w http.ResponseWriter, req map[string]interfa
 	callReq := mcp_protocol.MCPToolCallRequest{}
 	if err := mapToStruct(req, &callReq); err != nil {
 		http.Error(w, "Invalid call_tool request format", http.StatusBadRequest)
+		return
+	}
+
+	// 检查权限：验证该 agent_id 是否有权调用此工具
+	if !s.config.IsToolAllowed(callReq.AgentID, callReq.Name) {
+		response := mcp_protocol.MCPToolCallResponse{
+			Error: "Permission denied: agent '" + callReq.AgentID + "' is not allowed to call tool '" + callReq.Name + "'",
+		}
+		if err := json.NewEncoder(w).Encode(response); err != nil {
+			log.Printf("Error encoding permission denied response: %v", err)
+			http.Error(w, "Internal server error", http.StatusInternalServerError)
+		}
 		return
 	}
 
